@@ -16,6 +16,7 @@ from pymc_core.protocol.constants import (
 from pymc_core.protocol.packet_utils import PacketHeaderUtils, PacketTimingUtils
 
 from repeater.airtime import AirtimeManager
+from repeater.mqtt_publisher import MQTTPublisher
 
 logger = logging.getLogger("RepeaterHandler")
 
@@ -27,7 +28,7 @@ class RepeaterHandler(BaseHandler):
 
         return 0xFF  # Special marker (not a real payload type)
 
-    def __init__(self, config: dict, dispatcher, local_hash: int, send_advert_func=None):
+    def __init__(self, config: dict, dispatcher, local_hash: int, send_advert_func=None, public_key: str = ""):
 
         self.config = config
         self.dispatcher = dispatcher
@@ -73,6 +74,19 @@ class RepeaterHandler(BaseHandler):
 
         # Neighbor tracking (repeaters discovered via adverts)
         self.neighbors = {}
+        
+        # Initialize MQTT publisher (optional, won't affect main repeater if it fails)
+        self.mqtt_publisher = None
+        try:
+            mqtt_config = config.get("mqtt", {})
+            node_name = config.get("repeater", {}).get("node_name", "Repeater")
+            initial_public_key = public_key or ""
+            self.mqtt_publisher = MQTTPublisher(mqtt_config, node_name, initial_public_key, config)
+            if self.mqtt_publisher.enabled:
+                logger.info("MQTT publishing enabled")
+        except Exception as e:
+            logger.warning(f"Failed to initialize MQTT publisher (continuing without it): {e}")
+            self.mqtt_publisher = None
 
     async def __call__(self, packet: Packet, metadata: Optional[dict] = None) -> None:
 
@@ -100,6 +114,15 @@ class RepeaterHandler(BaseHandler):
         transmitted = False
         tx_delay_ms = 0.0
         drop_reason = None
+
+        raw_packet_hex = None
+        try:
+            if hasattr(packet, "write_to"):
+                raw_bytes = packet.write_to()
+                if isinstance(raw_bytes, (bytes, bytearray)):
+                    raw_packet_hex = raw_bytes.hex()
+        except Exception as exc:
+            logger.debug(f"Failed to serialize packet for raw export: {exc}")
 
         original_path = list(packet.path) if packet.path else []
 
@@ -218,8 +241,23 @@ class RepeaterHandler(BaseHandler):
             "forwarded_path": (
                 [f"{b:02X}" for b in forwarded_path] if forwarded_path is not None else None
             ),
+            "raw_packet": raw_packet_hex,
 
         }
+
+        logger.debug(f"Packet record: {packet_record}")
+
+        # Publish to MQTT (non-blocking, failures won't affect repeater)
+        if self.mqtt_publisher and self.mqtt_publisher.enabled:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.mqtt_publisher.publish_packet, packet_record)
+                # Also publish raw packet data for map compatibility
+                if packet.payload:
+                    await loop.run_in_executor(None, self.mqtt_publisher.publish_raw_packet, packet.payload.hex())
+            except Exception as e:
+                # Never let MQTT exceptions affect the repeater
+                logger.debug(f"MQTT publish exception (ignored): {e}")
 
         # If this is a duplicate, try to attach it to the original packet
         if is_dupe and len(self.recent_packets) > 0:
@@ -261,6 +299,20 @@ class RepeaterHandler(BaseHandler):
         expired = [k for k, ts in self.seen_packets.items() if now - ts > self.cache_ttl]
         for k in expired:
             del self.seen_packets[k]
+
+    def set_public_key(self, public_key: str):
+        """
+        Set the public key for MQTT publisher (called once identity is available).
+        
+        Args:
+            public_key: Hex-encoded public key
+        """
+        if self.mqtt_publisher:
+            try:
+                self.mqtt_publisher.set_public_key(public_key)
+                logger.debug("Updated MQTT publisher with public key")
+            except Exception as e:
+                logger.debug(f"Failed to set MQTT public key: {e}")
 
 
 

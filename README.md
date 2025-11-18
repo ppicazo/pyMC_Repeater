@@ -153,6 +153,102 @@ sudo bash setup-radio-config.sh /etc/pymc_repeater or sudo bash manage.sh
 sudo systemctl restart pymc-repeater
 
 ```
+
+### MQTT Integration
+
+**Configuration Example:**
+
+Edit `/etc/pymc_repeater/config.yaml` and add/modify the MQTT section:
+
+```yaml
+mqtt:
+  # Enable/disable MQTT publishing
+  enabled: true
+
+  # MQTT broker settings
+  server: mqtt.example.com
+  port: 1883
+  transport: "tcp"          # switch to "websockets" for brokers like LetsMesh
+  websocket_path: "/mqtt"    # optional, only used for WebSocket transports
+  websocket_headers:
+    X-Forwarded-For: "mesh-repeater"
+
+  # Authentication (leave empty for no authentication)
+  username: "your_username"
+  password: "your_password"
+
+  # TLS/SSL settings
+  use_tls: false
+  tls_verify: true
+
+  # Topic templates
+  # Supported variables: {NODE_NAME}, {PUBLIC_KEY}
+  topic_status: "meshcore/{NODE_NAME}/status"
+  topic_packets: "meshcore/{NODE_NAME}/packets"
+  topic_raw: "meshcore/{NODE_NAME}/raw"
+
+  # MQTT client settings
+  client_id_prefix: "pymc_repeater"
+  # Brokers like LetsMesh enforce a 23-char client ID cap; adjust if yours allows longer IDs
+  client_id_max_length: 23
+  qos: 0
+  retain: false
+  keepalive: 60
+```
+
+**Public MQTT Brokers:**
+
+For connecting to public MeshCore observer networks like [LetsMesh.net](https://letsmesh.net), use these settings:
+
+```yaml
+mqtt:
+  enabled: true
+  server: mqtt-us-v1.letsmesh.net
+  port: 443
+  transport: "websockets"
+  username: "your_username"
+  password: "your_password"
+  use_tls: true
+  tls_verify: true
+  topic_packets: "meshcore/{NODE_NAME}/packets"
+  topic_raw: "meshcore/{NODE_NAME}/raw"
+
+  #### LetsMesh / letsme.sh Auth Tokens
+
+  Some public analyzers (LetsMesh Packet Analyzer, letsme.sh, meshcoretomqtt) require a JWT-style auth token derived from your repeater's public key instead of a static password. We ported the MeshCore signer directly into pyMC_Repeater (via PyNaCl), so no external Node.js tooling is required anymore:
+
+  1. Decide which key will sign tokens. The easiest path is to reuse the repeater identity by setting `use_mesh_identity_key: true`, but you can also point at `private_key_path`, `private_key_hex`, or `private_key_env`.
+
+  2. Enable the auth token block in `config.yaml`:
+
+    ```yaml
+    mqtt:
+      enabled: true
+      server: mqtt-us-v1.letsmesh.net
+      port: 443
+      use_tls: true
+      tls_verify: true
+      auth_token:
+       enabled: true
+       # reuse the repeater's mesh identity so you do not need to store a second key
+       use_mesh_identity_key: true
+       token_audience: "mqtt-us-v1.letsmesh.net"
+       username_template: "v1_{PUBLIC_KEY}"
+    ```
+
+    The repeater refreshes the token every hour (configurable via `token_ttl`) without blocking forwarding.
+
+  3. If LetsMesh provides a ready-made token (for example via an `AUTH_TOKEN` environment variable or helper script), skip signing by pointing pyMC_Repeater at the token source instead:
+
+    ```yaml
+    auth_token:
+      enabled: true
+      token_env_var: "AUTH_TOKEN"   # or set token_command: "/usr/local/bin/get_token {AUDIENCE}"
+      username_template: "v1_{PUBLIC_KEY}"
+    ```
+
+  Additional knobs such as `private_key_path`, `token_email`, and `token_owner` are available in `config.yaml.example` for sites that expect richer JWT claims. Owner/email metadata is only sent when TLS verification is enabled to avoid leaking identity data over plaintext connections.
+```
 ## Upgrading
 
 To upgrade an existing installation to the latest version:

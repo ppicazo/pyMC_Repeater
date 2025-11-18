@@ -93,6 +93,7 @@ class RepeaterDaemon:
 
 
             pubkey = local_identity.get_public_key()
+            pub_key_hex = pubkey.hex()
             self.local_hash = pubkey[0]
             logger.info(f"Local identity set: {local_identity.get_address_bytes().hex()}")
             local_hash_hex = f"0x{self.local_hash: 02x}"
@@ -102,11 +103,23 @@ class RepeaterDaemon:
             self.dispatcher._is_own_packet = lambda pkt: False
 
             self.repeater_handler = RepeaterHandler(
-                self.config, self.dispatcher, self.local_hash, send_advert_func=self.send_advert
+                self.config,
+                self.dispatcher,
+                self.local_hash,
+                send_advert_func=self.send_advert,
+                public_key=pub_key_hex,
             )
 
             self.dispatcher.register_fallback_handler(self._repeater_callback)
             logger.info("Repeater handler registered (forwarder mode)")
+            
+            # Set public key for MQTT publisher now that we have the identity
+            if self.repeater_handler and local_identity:
+                try:
+                    # Reuse the already computed public key to refresh auth token state
+                    self.repeater_handler.set_public_key(pub_key_hex)
+                except Exception as e:
+                    logger.debug(f"Failed to set MQTT public key: {e}")
 
             self.trace_handler = TraceHandler(log_fn=logger.info)
             
