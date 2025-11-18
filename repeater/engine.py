@@ -308,6 +308,32 @@ class RepeaterHandler(BaseHandler):
             score = self.calculate_packet_score(snr, payload_len, self.radio_config["spreading_factor"])
 
         raw_packet_hex = self._serialize_packet_hex(packet)
+        if raw_packet_hex:
+            try:
+                raw_length = len(bytes.fromhex(raw_packet_hex))
+            except ValueError:
+                raw_length = None
+        else:
+            raw_length = None
+            try:
+                if hasattr(packet, "write_to"):
+                    raw_bytes = packet.write_to()
+                    if isinstance(raw_bytes, (bytes, bytearray)):
+                        raw_length = len(raw_bytes)
+            except Exception:
+                raw_length = None
+        if raw_length is None:
+            path_len = len(packet.path) if getattr(packet, "path", None) else 0
+            # The '2' bytes represent the MeshCore packet header (typically header + type).
+            raw_length = 2 + path_len + payload_len
+
+        rx_duration_ms = None
+        if not transmitted and raw_length:
+            try:
+                rx_duration_ms = PacketTimingUtils.estimate_airtime_ms(raw_length, self.radio_config)
+            except Exception:
+                rx_duration_ms = None
+
         packet_hash = packet.calculate_packet_hash().hex() if hasattr(packet, "calculate_packet_hash") else None
 
         record = {
@@ -317,14 +343,14 @@ class RepeaterHandler(BaseHandler):
             "payload_length": payload_len,
             "type": payload_type,
             "route": route_type,
-            "length": payload_len,
+            "length": raw_length,
             "rssi": rssi,
             "snr": snr,
             "score": score,
             "tx_delay_ms": tx_delay_ms,
             "transmitted": transmitted,
             "is_duplicate": is_duplicate,
-            "packet_hash": packet_hash[:16] if packet_hash else None,
+            "packet_hash": packet_hash,
             "drop_reason": drop_reason,
             "path_hash": path_hash,
             "src_hash": src_hash,
@@ -332,6 +358,7 @@ class RepeaterHandler(BaseHandler):
             "original_path": ([f"{b:02X}" for b in original_path] if original_path else None),
             "forwarded_path": ([f"{b:02X}" for b in forwarded_path] if forwarded_path else None),
             "raw_packet": raw_packet_hex,
+            "rx_duration_ms": rx_duration_ms,
         }
         return record
 

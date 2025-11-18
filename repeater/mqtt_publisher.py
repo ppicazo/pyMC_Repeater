@@ -66,25 +66,25 @@ class MQTTPublisher:
         self.message_queue = queue.Queue(maxsize=1000)
         self.worker_thread = None
         self.stop_event = threading.Event()
-        
+
         # MQTT client
         self.client = None
-        
+
         if not self.enabled:
             logger.info("MQTT publishing is disabled")
             return
-            
+
         if not MQTT_AVAILABLE:
             logger.error("paho-mqtt package not installed. MQTT functionality disabled.")
             self.enabled = False
             return
-        
+
         # Validate required config
         if not self.config.get("server"):
             logger.error("MQTT server not configured. MQTT functionality disabled.")
             self.enabled = False
             return
-        
+
         if self.enabled:
             try:
                 self.auth_token_provider = AuthTokenProvider(self.global_config, self.config, self.node_name)
@@ -92,7 +92,7 @@ class MQTTPublisher:
                 logger.error(f"Auth token configuration error: {exc}")
                 self.enabled = False
                 return
-        
+
         # Initialize MQTT client
         try:
             self._init_mqtt_client()
@@ -100,7 +100,7 @@ class MQTTPublisher:
             logger.error(f"Failed to initialize MQTT client: {e}")
             self.enabled = False
             return
-        
+
         # Start worker thread
         self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker_thread.start()
@@ -110,7 +110,7 @@ class MQTTPublisher:
         """Initialize and configure MQTT client."""
         if not MQTT_AVAILABLE:
             return
-            
+
         logger.debug("_init_mqtt_client")
 
         client_id = self._build_client_id()
@@ -510,19 +510,21 @@ class MQTTPublisher:
             return
         
         try:
-            # Capture timestamp once for consistency
-            ts_value = packet_data.get("timestamp")
-            if isinstance(ts_value, (int, float)):
-                ts_dt = datetime.fromtimestamp(ts_value)
+            publish_dt = datetime.now()
+
+            event_ts = packet_data.get("timestamp")
+            if isinstance(event_ts, (int, float)):
+                event_dt = datetime.fromtimestamp(event_ts)
             else:
-                ts_dt = datetime.now()
-            timestamp_iso = ts_dt.isoformat()
+                event_dt = publish_dt
 
             direction = "tx" if packet_data.get("transmitted") else "rx"
-            length_field = str(packet_data.get("length", packet_data.get("payload_length", 0)))
-            payload_len_field = str(packet_data.get("payload_length", 0))
-
             route_label = self._format_route(packet_data.get("route"))
+            total_length = packet_data.get("length")
+            if total_length is None:
+                total_length = packet_data.get("payload_length", 0)
+            payload_length = packet_data.get("payload_length", 0)
+
             payload_hex = (
                 packet_data.get("raw_packet")
                 or packet_data.get("payload")
@@ -536,63 +538,55 @@ class MQTTPublisher:
             message = {
                 "origin": self.node_name,
                 "origin_id": self.public_key,
-                "timestamp": timestamp_iso,
+                "timestamp": publish_dt.isoformat(),
                 "type": "PACKET",
                 "direction": direction,
-                "time": ts_dt.strftime("%H:%M:%S"),
-                "date": ts_dt.strftime("%d/%m/%Y"),
-                "len": length_field,
+                "time": event_dt.strftime("%H:%M:%S"),
+                "date": event_dt.strftime("%d/%m/%Y"),
+                "len": str(total_length),
                 "packet_type": str(packet_data.get("type", 0)),
                 "route": route_label,
-                "payload_len": payload_len_field,
+                "payload_len": str(payload_length),
                 "raw": payload_hex,
             }
 
             if direction == "rx":
-                message["SNR"] = str(packet_data.get("snr", 0))
-                message["RSSI"] = str(packet_data.get("rssi", 0))
+                snr_val = packet_data.get("snr")
+                rssi_val = packet_data.get("rssi")
+                message["SNR"] = str(int(round(snr_val))) if snr_val is not None else "0"
+                message["RSSI"] = str(int(round(rssi_val))) if rssi_val is not None else "0"
                 score_value = packet_data.get("score")
                 if score_value is not None:
-                    message["score"] = str(score_value)
+                    score_int = max(0, int(round(score_value * 1000)))
+                else:
+                    score_int = 0
+                message["score"] = str(score_int)
+                duration_value = packet_data.get("rx_duration_ms")
+                if duration_value is not None:
+                    message["duration"] = str(int(round(duration_value)))
                 hash_value = packet_data.get("packet_hash")
                 if hash_value:
-                    message["hash"] = str(hash_value).upper()[:16]
+                    message["hash"] = str(hash_value).upper()
+                if route_label == "D":
+                    hop_source = packet_data.get("original_path") or packet_data.get("forwarded_path")
+                    if hop_source:
+                        hop_strings = [f"{hop:02X}" if isinstance(hop, int) else str(hop) for hop in hop_source]
+                        hop_strings = [hs for hs in hop_strings if hs]
+                        if hop_strings:
+                            message["path"] = " -> ".join(hop_strings)
 
-            duration_ms = packet_data.get("tx_delay_ms")
-            if duration_ms is not None:
-                message["duration"] = str(duration_ms)
-            
-            # Add optional fields
-            if packet_data.get("src_hash"):
-                message["src_hash"] = packet_data["src_hash"]
-            if packet_data.get("dst_hash"):
-                message["dst_hash"] = packet_data["dst_hash"]
-            if route_label == "D":
-                path_hops = packet_data.get("original_path") or packet_data.get("forwarded_path")
-                if path_hops:
-                    hop_strings = [str(hop) for hop in path_hops if hop is not None]
-                    if hop_strings:
-                        message["path"] = " -> ".join(hop_strings)
-            if "path" not in message and route_label == "D" and packet_data.get("path_hash"):
-                message["path"] = packet_data["path_hash"]
-            
-            # Convert to JSON
             payload = json.dumps(message)
-            
-            # Determine topic
+
             topic = self._format_topic(self.config.get("topic_packets", "meshcore/packets"))
-            
-            # Queue for publishing (non-blocking)
+
             try:
                 logger.debug("Queueing MQTT packet for topic %s", topic)
                 self.message_queue.put_nowait((topic, payload))
             except queue.Full:
-                # Queue is full, drop message (this prevents blocking)
                 self.packets_failed += 1
                 logger.warning("MQTT queue full, dropping packet for topic %s", topic)
                 
         except Exception as e:
-            # Never let exceptions escape
             logger.debug(f"Exception formatting MQTT message: {e}")
             self.packets_failed += 1
 
