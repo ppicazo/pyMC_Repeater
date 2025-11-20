@@ -350,7 +350,7 @@ class RepeaterHandler(BaseHandler):
             "tx_delay_ms": tx_delay_ms,
             "transmitted": transmitted,
             "is_duplicate": is_duplicate,
-            "packet_hash": packet_hash,
+            "packet_hash": packet_hash[:16] if packet_hash else None,
             "drop_reason": drop_reason,
             "path_hash": path_hash,
             "src_hash": src_hash,
