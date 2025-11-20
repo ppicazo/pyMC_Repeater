@@ -96,7 +96,7 @@ class RepeaterDaemon:
             pub_key_hex = pubkey.hex()
             self.local_hash = pubkey[0]
             logger.info(f"Local identity set: {local_identity.get_address_bytes().hex()}")
-            local_hash_hex = f"0x{self.local_hash: 02x}"
+            local_hash_hex = f"0x{self.local_hash:02x}"
             logger.info(f"Local node hash (from identity): {local_hash_hex}")
 
 
