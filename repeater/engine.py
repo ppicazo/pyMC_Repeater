@@ -115,7 +115,6 @@ class RepeaterHandler(BaseHandler):
         tx_delay_ms = 0.0
         drop_reason = None
 
-        raw_packet_hex = None
         original_path = list(packet.path) if packet.path else []
 
         # Process for forwarding (skip if in monitor mode)
