@@ -16,6 +16,7 @@ from pymc_core.protocol.constants import (
 from pymc_core.protocol.packet_utils import PacketHeaderUtils, PacketTimingUtils
 
 from repeater.airtime import AirtimeManager
+from repeater.mqtt_publisher import MQTTPublisher
 
 logger = logging.getLogger("RepeaterHandler")
 
@@ -27,7 +28,7 @@ class RepeaterHandler(BaseHandler):
 
         return 0xFF  # Special marker (not a real payload type)
 
-    def __init__(self, config: dict, dispatcher, local_hash: int, send_advert_func=None):
+    def __init__(self, config: dict, dispatcher, local_hash: int, send_advert_func=None, public_key: str = ""):
 
         self.config = config
         self.dispatcher = dispatcher
@@ -73,6 +74,19 @@ class RepeaterHandler(BaseHandler):
 
         # Neighbor tracking (repeaters discovered via adverts)
         self.neighbors = {}
+        
+        # Initialize MQTT publisher (optional, won't affect main repeater if it fails)
+        self.mqtt_publisher = None
+        try:
+            mqtt_config = config.get("mqtt", {})
+            node_name = config.get("repeater", {}).get("node_name", "Repeater")
+            initial_public_key = public_key or ""
+            self.mqtt_publisher = MQTTPublisher(mqtt_config, node_name, initial_public_key, config)
+            if self.mqtt_publisher.enabled:
+                logger.info("MQTT publishing enabled")
+        except Exception as e:
+            logger.warning(f"Failed to initialize MQTT publisher (continuing without it): {e}")
+            self.mqtt_publisher = None
 
     async def __call__(self, packet: Packet, metadata: Optional[dict] = None) -> None:
 
@@ -167,59 +181,22 @@ class RepeaterHandler(BaseHandler):
         if payload_type == PAYLOAD_TYPE_ADVERT:
             self._process_advert(packet, rssi, snr)
 
-        path_hash = None
-        display_path = (
-            original_path if original_path else (list(packet.path) if packet.path else [])
+        packet_record = self._build_packet_record(
+            packet,
+            transmitted=transmitted,
+            tx_delay_ms=tx_delay_ms,
+            drop_reason=drop_reason,
+            snr=snr,
+            rssi=rssi,
+            original_path=original_path,
+            forwarded_path=forwarded_path,
+            is_duplicate=is_dupe,
         )
-        if display_path and len(display_path) > 0:
-            # Format path as array of uppercase hex bytes
-            path_bytes = [f"{b:02X}" for b in display_path[:8]]  # First 8 bytes max
-            if len(display_path) > 8:
-                path_bytes.append("...")
-            path_hash = "[" + ", ".join(path_bytes) + "]"
 
-        src_hash = None
-        dst_hash = None
+        logger.debug(f"Packet record: {packet_record}")
 
-        # Payload types with dest_hash and src_hash as first 2 bytes
-        if payload_type in [0x00, 0x01, 0x02, 0x08]:
-            if hasattr(packet, "payload") and packet.payload and len(packet.payload) >= 2:
-                dst_hash = f"{packet.payload[0]:02X}"
-                src_hash = f"{packet.payload[1]:02X}"
-
-        # ADVERT packets have source identifier as first byte
-        elif payload_type == PAYLOAD_TYPE_ADVERT:
-            if hasattr(packet, "payload") and packet.payload and len(packet.payload) >= 1:
-                src_hash = f"{packet.payload[0]:02X}"
-
-        # Record packet for charts
-        packet_record = {
-            "timestamp": time.time(),
-            "header": f"0x{packet.header:02X}" if hasattr(packet, "header") and packet.header is not None else None,
-            "payload": packet.payload.hex() if hasattr(packet, "payload") and packet.payload else None,
-            "payload_length": len(packet.payload) if hasattr(packet, "payload") and packet.payload else 0,
-            "type": payload_type,
-            "route": route_type,
-            "length": len(packet.payload or b""),
-            "rssi": rssi,
-            "snr": snr,
-            "score": self.calculate_packet_score(
-                snr, len(packet.payload or b""), self.radio_config["spreading_factor"]
-            ),
-            "tx_delay_ms": tx_delay_ms,
-            "transmitted": transmitted,
-            "is_duplicate": is_dupe,
-            "packet_hash": pkt_hash[:16],
-            "drop_reason": drop_reason,
-            "path_hash": path_hash,
-            "src_hash": src_hash,
-            "dst_hash": dst_hash,
-            "original_path": ([f"{b:02X}" for b in original_path] if original_path else None),
-            "forwarded_path": (
-                [f"{b:02X}" for b in forwarded_path] if forwarded_path is not None else None
-            ),
-
-        }
+        # Publish to MQTT (non-blocking, failures won't affect repeater)
+        await self._publish_packet_record(packet_record)
 
         # If this is a duplicate, try to attach it to the original packet
         if is_dupe and len(self.recent_packets) > 0:
@@ -261,6 +238,140 @@ class RepeaterHandler(BaseHandler):
         expired = [k for k, ts in self.seen_packets.items() if now - ts > self.cache_ttl]
         for k in expired:
             del self.seen_packets[k]
+
+    def set_public_key(self, public_key: str):
+        """
+        Set the public key for MQTT publisher (called once identity is available).
+        
+        Args:
+            public_key: Hex-encoded public key
+        """
+        if self.mqtt_publisher:
+            try:
+                self.mqtt_publisher.set_public_key(public_key)
+                logger.debug("Updated MQTT publisher with public key")
+            except Exception as e:
+                logger.debug(f"Failed to set MQTT public key: {e}")
+
+    def _serialize_packet_hex(self, packet: Packet) -> Optional[str]:
+        """Return a hex string representation of the packet, if possible."""
+        try:
+            if hasattr(packet, "write_to"):
+                raw_bytes = packet.write_to()
+                if isinstance(raw_bytes, (bytes, bytearray)):
+                    return raw_bytes.hex()
+        except Exception as exc:
+            logger.debug(f"Failed to serialize packet for MQTT export: {exc}")
+        return None
+
+    def _build_packet_record(
+        self,
+        packet: Packet,
+        *,
+        transmitted: bool,
+        tx_delay_ms: float,
+        drop_reason: Optional[str],
+        snr: Optional[float],
+        rssi: Optional[float],
+        original_path: Optional[list],
+        forwarded_path: Optional[list],
+        is_duplicate: bool,
+    ) -> dict:
+
+        payload_bytes = packet.payload or b""
+        payload_len = len(payload_bytes)
+        header_info = PacketHeaderUtils.parse_header(packet.header) if hasattr(packet, "header") and packet.header is not None else {"payload_type": 0, "route_type": 0}
+        payload_type = header_info.get("payload_type", 0)
+        route_type = header_info.get("route_type", 0)
+
+        display_path = original_path if original_path is not None else (list(packet.path) if packet.path else [])
+        path_hash = None
+        if display_path:
+            path_bytes = [f"{b:02X}" for b in display_path[:8]]
+            if len(display_path) > 8:
+                path_bytes.append("...")
+            path_hash = "[" + ", ".join(path_bytes) + "]"
+
+        src_hash = None
+        dst_hash = None
+        if payload_type in [0x00, 0x01, 0x02, 0x08]:
+            if payload_bytes and len(payload_bytes) >= 2:
+                dst_hash = f"{payload_bytes[0]:02X}"
+                src_hash = f"{payload_bytes[1]:02X}"
+        elif payload_type == PAYLOAD_TYPE_ADVERT:
+            if payload_bytes:
+                src_hash = f"{payload_bytes[0]:02X}"
+
+        score = None
+        if snr is not None:
+            score = self.calculate_packet_score(snr, payload_len, self.radio_config["spreading_factor"])
+
+        raw_packet_hex = self._serialize_packet_hex(packet)
+        if raw_packet_hex:
+            try:
+                raw_length = len(bytes.fromhex(raw_packet_hex))
+            except ValueError:
+                raw_length = None
+        else:
+            raw_length = None
+            try:
+                if hasattr(packet, "write_to"):
+                    raw_bytes = packet.write_to()
+                    if isinstance(raw_bytes, (bytes, bytearray)):
+                        raw_length = len(raw_bytes)
+            except Exception:
+                raw_length = None
+        if raw_length is None:
+            path_len = len(packet.path) if getattr(packet, "path", None) else 0
+            # The '2' bytes represent the MeshCore packet header (typically header + type).
+            raw_length = 2 + path_len + payload_len
+
+        rx_duration_ms = None
+        if not transmitted and raw_length:
+            try:
+                rx_duration_ms = PacketTimingUtils.estimate_airtime_ms(raw_length, self.radio_config)
+            except Exception:
+                rx_duration_ms = None
+
+        packet_hash = packet.calculate_packet_hash().hex() if hasattr(packet, "calculate_packet_hash") else None
+
+        record = {
+            "timestamp": time.time(),
+            "header": f"0x{packet.header:02X}" if hasattr(packet, "header") and packet.header is not None else None,
+            "payload": payload_bytes.hex() if payload_bytes else None,
+            "payload_length": payload_len,
+            "type": payload_type,
+            "route": route_type,
+            "length": raw_length,
+            "rssi": rssi,
+            "snr": snr,
+            "score": score,
+            "tx_delay_ms": tx_delay_ms,
+            "transmitted": transmitted,
+            "is_duplicate": is_duplicate,
+            "packet_hash": packet_hash[:16] if packet_hash else None,
+            "drop_reason": drop_reason,
+            "path_hash": path_hash,
+            "src_hash": src_hash,
+            "dst_hash": dst_hash,
+            "original_path": ([f"{b:02X}" for b in original_path] if original_path else None),
+            "forwarded_path": ([f"{b:02X}" for b in forwarded_path] if forwarded_path else None),
+            "raw_packet": raw_packet_hex,
+            "rx_duration_ms": rx_duration_ms,
+        }
+        return record
+
+    async def _publish_packet_record(self, packet_record: dict):
+        if not self.mqtt_publisher or not self.mqtt_publisher.enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            await loop.run_in_executor(None, self.mqtt_publisher.publish_packet, packet_record)
+        except Exception as exc:
+            logger.debug(f"MQTT publish exception (ignored): {exc}")
 
 
 
@@ -548,6 +659,22 @@ class RepeaterHandler(BaseHandler):
                 logger.info(
                     f"Retransmitted packet ({packet_size} bytes, {airtime_ms:.1f}ms airtime)"
                 )
+
+                tx_record = self._build_packet_record(
+                    fwd_pkt,
+                    transmitted=True,
+                    tx_delay_ms=delay * 1000.0,
+                    drop_reason=None,
+                    snr=None,
+                    rssi=None,
+                    original_path=None,
+                    forwarded_path=list(fwd_pkt.path) if fwd_pkt.path else None,
+                    is_duplicate=False,
+                )
+                self.recent_packets.append(tx_record)
+                if len(self.recent_packets) > self.max_recent_packets:
+                    self.recent_packets.pop(0)
+                await self._publish_packet_record(tx_record)
             except Exception as e:
                 logger.error(f"Retransmit failed: {e}")
 

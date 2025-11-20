@@ -108,3 +108,69 @@ logging:
 
   # Log format
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# MQTT Configuration
+# mqtt:
+#   # Enable/disable MQTT publishing
+#   enabled: false
+# 
+#   # MQTT broker settings
+#   server: mqtt.example.com
+#   port: 1883
+#   # Select 'tcp' (default) or 'websockets' transport depending on your broker
+#   transport: "tcp"
+#   websocket_path: "/mqtt"
+#   websocket_headers:
+#     X-Forwarded-For: "mesh-repeater"
+# 
+#   # Authentication
+#   # Leave empty to disable authentication
+#   username: ""
+#   password: ""
+# 
+#   # TLS/SSL settings
+#   use_tls: false
+#   tls_verify: true
+# 
+#   # MQTT topic templates
+#   # Supported variables: {NODE_NAME}, {PUBLIC_KEY}
+#   topic_status: "meshcore/{NODE_NAME}/status"
+#   topic_packets: "meshcore/{NODE_NAME}/packets"
+#   topic_raw: "meshcore/{NODE_NAME}/raw"
+# 
+#   # Auth-token (LetsMesh / letsme.sh) settings
+#   auth_token:
+#     # Toggle JWT-based authentication instead of static username/password
+#     enabled: false
+#
+#     # Set to true to reuse the repeater's mesh identity key for signing JWTs
+#     # Tokens are signed locally using the built-in MeshCore signer
+#     use_mesh_identity_key: false
+#
+#     # Optional alternative private key sources (only one is required)
+#     private_key_hex: ""
+#     private_key_path: "/etc/pymc_repeater/letsmesh_prv.key"
+#     private_key_env: "PYMC_REPEATER_MQTT_PRIVATE_KEY"
+#
+#     # Provide an existing token via env var or custom command instead of signing locally
+#     token_env_var: ""  # e.g. AUTH_TOKEN
+#     token_command: ""  # e.g. /usr/local/bin/fetch_token --aud {AUDIENCE}
+#
+#     # JWT claims and refresh tuning
+#     token_audience: "mqtt-us-v1.letsmesh.net"
+#     token_owner: ""
+#     token_email: ""
+#     token_ttl: 3600
+#     token_refresh_margin: 300
+#
+#     # Username format applied when publishing via LetsMesh (default matches meshcoretomqtt)
+#     username_template: "v1_{PUBLIC_KEY}"
+# 
+#   # MQTT client settings
+#   client_id_prefix: "pymc_repeater"
+#   # Some public brokers (LetsMesh) cap client IDs at 23 chars.
+#   # Override if your broker allows longer identifiers.
+#   client_id_max_length: 23
+#   qos: 0
+#   retain: false
+#   keepalive: 60

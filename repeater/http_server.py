@@ -820,9 +820,12 @@ class StatsApp:
 
                         # Get proper CSS class for route type
                         route_class = route.lower().replace("_", "-")
-                        snr_val = pkt.get("snr", 0.0)
-                        score_val = pkt.get("score", 0)
-                        delay_val = pkt.get("tx_delay_ms", 0)
+                        snr_val = pkt.get("snr")
+                        snr_display = f"{snr_val:.1f}" if isinstance(snr_val, (int, float)) else "-"
+                        score_val = pkt.get("score")
+                        score_display = f"{score_val:.2f}" if isinstance(score_val, (int, float)) else "-"
+                        delay_val = pkt.get("tx_delay_ms")
+                        delay_display = f"{delay_val:.0f}" if isinstance(delay_val, (int, float)) else "-"
 
                         packets_table += (
                             "<tr>"
@@ -831,9 +834,9 @@ class StatsApp:
                             f'<td><span class="route-{route_class}">{route}</span></td>'
                             f"<td>{pkt.get('length', 0)}</td>"
                             f"<td>{pkt.get('rssi', 0)}</td>"
-                            f"<td>{snr_val: .1f}</td>"
-                            f'<td><span class="score">{score_val: .2f}</span></td>'
-                            f"<td>{delay_val: .0f}</td>"
+                            f"<td>{snr_display}</td>"
+                            f'<td><span class="score">{score_display}</span></td>'
+                            f"<td>{delay_display}</td>"
                             f"<td>{status}</td>"
                             "</tr>"
                         )
