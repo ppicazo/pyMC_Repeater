@@ -494,8 +494,8 @@ class MQTTPublisher:
                 self._publish_status("offline")
                 self.client.loop_stop()
                 self.client.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Exception during MQTT shutdown: {e}")
         
         logger.info("MQTT worker thread stopped")
 
