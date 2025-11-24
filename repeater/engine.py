@@ -21,6 +21,7 @@ from pymc_core.protocol.packet_utils import PacketHeaderUtils, PacketTimingUtils
 
 from repeater.airtime import AirtimeManager
 from repeater.data_acquisition import StorageCollector
+from repeater.utils.hash_format import format_packet_hash
 
 logger = logging.getLogger("RepeaterHandler")
 
@@ -184,7 +185,7 @@ class RepeaterHandler(BaseHandler):
             )
 
         # Check if this is a duplicate
-        pkt_hash = packet.calculate_packet_hash().hex()
+        pkt_hash = format_packet_hash(packet)
         is_dupe = pkt_hash in self.seen_packets and not transmitted
 
         # Set drop reason for duplicates
@@ -418,14 +419,14 @@ class RepeaterHandler(BaseHandler):
 
     def is_duplicate(self, packet: Packet) -> bool:
 
-        pkt_hash = packet.calculate_packet_hash().hex()
+        pkt_hash = format_packet_hash(packet)
         if pkt_hash in self.seen_packets:
             return True
         return False
 
     def mark_seen(self, packet: Packet):
 
-        pkt_hash = packet.calculate_packet_hash().hex()
+        pkt_hash = format_packet_hash(packet)
         self.seen_packets[pkt_hash] = time.time()
 
         if len(self.seen_packets) > self.max_cache_size:
