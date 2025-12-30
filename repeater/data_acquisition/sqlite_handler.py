@@ -7,6 +7,13 @@ import base64
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+from pymc_core.protocol.constants import (
+    ROUTE_TYPE_DIRECT,
+    ROUTE_TYPE_TRANSPORT_DIRECT,
+    ROUTE_TYPE_FLOOD,
+    ROUTE_TYPE_TRANSPORT_FLOOD,
+)
+
 logger = logging.getLogger("SQLiteHandler")
 
 
@@ -200,14 +207,44 @@ class SQLiteHandler:
     def store_advert(self, record: dict):
         try:
             with sqlite3.connect(self.sqlite_path) as conn:
+                conn.row_factory = sqlite3.Row
                 existing = conn.execute(
-                    "SELECT pubkey, first_seen, advert_count FROM adverts WHERE pubkey = ? ORDER BY last_seen DESC LIMIT 1",
+                    "SELECT pubkey, first_seen, advert_count, route_type, zero_hop, rssi, snr FROM adverts WHERE pubkey = ? ORDER BY last_seen DESC LIMIT 1",
                     (record.get("pubkey", ""),)
                 ).fetchone()
                 
                 current_time = record.get("timestamp", time.time())
                 
                 if existing:
+                    # Prefer the most direct route_type when updating
+                    existing_route = existing["route_type"]
+                    incoming_route = record.get("route_type")
+                    preferred_route = self._prefer_route_type(existing_route, incoming_route)
+                    
+                    # Use incoming zero_hop value (already calculated from route_type + path_len)
+                    incoming_zero_hop = record.get("zero_hop", False)
+                    existing_zero_hop = bool(existing["zero_hop"])
+                    
+                    # Signal measurement logic:
+                    # - If incoming is zero-hop: ALWAYS store incoming rssi/snr (most recent zero-hop measurement)
+                    # - If incoming is multi-hop and existing was zero-hop: preserve existing (don't overwrite zero-hop with multi-hop)
+                    # - If both are multi-hop: store incoming (most recent measurement)
+                    if incoming_zero_hop:
+                        # Incoming is zero-hop: always use the fresh zero-hop measurement
+                        rssi_to_store = record.get("rssi")
+                        snr_to_store = record.get("snr")
+                        zero_hop_to_store = True
+                    elif existing_zero_hop:
+                        # Incoming is multi-hop but we have zero-hop data: preserve zero-hop measurement
+                        rssi_to_store = existing["rssi"]
+                        snr_to_store = existing["snr"]
+                        zero_hop_to_store = True
+                    else:
+                        # Both are multi-hop: use incoming measurement
+                        rssi_to_store = None
+                        snr_to_store = None
+                        zero_hop_to_store = False
+                    
                     conn.execute("""
                         UPDATE adverts 
                         SET timestamp = ?, node_name = ?, is_repeater = ?, route_type = ?,
@@ -219,14 +256,14 @@ class SQLiteHandler:
                         current_time,
                         record.get("node_name"),
                         record.get("is_repeater", False),
-                        record.get("route_type"),
+                        preferred_route,
                         record.get("contact_type"),
                         record.get("latitude"),
                         record.get("longitude"),
                         current_time,
-                        record.get("rssi"),
-                        record.get("snr"),
-                        record.get("zero_hop", False),
+                        rssi_to_store,
+                        snr_to_store,
+                        zero_hop_to_store,
                         record.get("pubkey", "")
                     ))
                 else:
@@ -256,6 +293,24 @@ class SQLiteHandler:
                 
         except Exception as e:
             logger.error(f"Failed to store advert in SQLite: {e}")
+
+    @staticmethod
+    def _prefer_route_type(existing: int, incoming: int) -> int:
+        """Prefer the most direct route type when multiple adverts exist."""
+        # Route preference order: Direct > Transport Direct > Flood > Transport Flood
+        preference = [ROUTE_TYPE_DIRECT, ROUTE_TYPE_TRANSPORT_DIRECT, ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD]
+
+        if existing in preference and incoming in preference:
+            existing_rank = preference.index(existing)
+            incoming_rank = preference.index(incoming)
+            return incoming if incoming_rank < existing_rank else existing
+
+        # If one is unknown, keep the known one; otherwise use incoming
+        if existing in preference:
+            return existing
+        if incoming in preference:
+            return incoming
+        return incoming
 
     def store_noise_floor(self, record: dict):
         try:
